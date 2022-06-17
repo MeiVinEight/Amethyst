@@ -1073,7 +1073,8 @@ void MT::thread::close() const
 {
 	if (!CloseHandle(this->object))
 	{
-		throw EA::exception(EA::exception::INTERNAL, GetLastError());
+		int err = GetLastError();
+		throw EA::exception(EA::exception::INTERNAL, err);
 	}
 }
 
