@@ -892,12 +892,11 @@ int main()
 	Amethyst::resource->load(prop);
 	prop.close();
 
+	WSA::startup();
 
 	// HTTP protocol
 	try
 	{
-		WSA::startup();
-
 		WSA::ServerSocket ss = WSA::ServerSocket(80);
 
 		// Monitor of console input
@@ -972,8 +971,6 @@ int main()
 		Memory::free(Amethyst::resource);
 		Memory::free(Amethyst::app);
 		Memory::free(Amethyst::root);
-
-		WSA::cleanup();
 	}
 	catch (const EA::exception &e)
 	{
@@ -984,8 +981,8 @@ int main()
 				stdout.write((BYTE *)"Address already in use.\n", 24);
 			}
 		}
-		exit((e.value << 1) | e.type);
 	}
+	WSA::cleanup();
 }
 
 
