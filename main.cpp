@@ -504,9 +504,7 @@ namespace Amethyst
 					while ((str = (String &&) scn.text()).length)
 					{
 						strScn.stream = &str;
-						String field = (String &&) strScn.string();
-						field.rewind(1);
-						obj.body[field] = (String &&) strScn.text();
+						obj.body.load(str);
 					}
 
 					if (obj.body.get("Connection"))
@@ -1008,7 +1006,7 @@ void Memory::copy(const void *from, void *to, QWORD size)
  * @param param is an array of data
  *
  * param layout: [DWORD (*)(LPVOID), MT::thread *, LPVOID]
- * @return
+ * @return exit code
  */
 DWORD MT::start(LPVOID param)
 {
