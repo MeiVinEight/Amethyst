@@ -488,6 +488,7 @@ namespace Amethyst
 					Amethyst::HTTP obj;
 					obj.connection = *sock;
 
+					// Read request
 					strScn.stream = &str;
 					obj.method = (String &&) strScn.string();
 					obj.URL = (String &&) strScn.string();
@@ -578,6 +579,7 @@ namespace Amethyst
 			{
 				content.write(b, len);
 			}
+			file.close();
 
 			out.stream = &header;
 			header.write(obj.version.string, obj.version.length);
@@ -891,85 +893,99 @@ int main()
 	prop.close();
 
 
-	WSA::startup();
-
 	// HTTP protocol
-	WSA::ServerSocket ss = WSA::ServerSocket(80);
-
-	// Monitor of console input
-	BYTE running = 1;
-	LPVOID *ps = (LPVOID *)Memory::allocate(sizeof(LPVOID) * 2);
-	ps[0] = &running;
-	ps[1] = &ss;
-	MT::thread(&Amethyst::console, ps);
-
-	// All connected socket
-	WSA::Socket *connection = (WSA::Socket *)Memory::allocate(sizeof(WSA::Socket) * 16);
-	DWORD length = 16;
-	DWORD k = 0;
-	for (DWORD i = 0; i < length; new(connection + i++) WSA::Socket());
-
-	while (running)
+	try
 	{
-		try
-		{
-			WSA::Socket sock = ss.accept();
-			String log;
-			Amethyst::printer out;
-			out.stream = &log;
-			out.text((LPCSTR)Amethyst::time().string);
-			out.text(" Connection ");
-			out.text((LPCSTR)Amethyst::address(sock.address).string);
-			out.text("\n");
-			stdout.write(log.string, log.length);
+		WSA::startup();
 
-			while (connection[k].connection != sock.connection)
+		WSA::ServerSocket ss = WSA::ServerSocket(80);
+
+		// Monitor of console input
+		BYTE running = 1;
+		LPVOID *ps = (LPVOID *) Memory::allocate(sizeof(LPVOID) * 2);
+		ps[0] = &running;
+		ps[1] = &ss;
+		MT::thread(&Amethyst::console, ps);
+
+		// All connected socket
+		WSA::Socket *connection = (WSA::Socket *) Memory::allocate(sizeof(WSA::Socket) * 16);
+		DWORD length = 16;
+		DWORD k = 0;
+		for (DWORD i = 0; i < length; new(connection + i++) WSA::Socket());
+
+		while (running)
+		{
+			try
 			{
-				for (DWORD i = 0; i < length; i++)
+				WSA::Socket sock = ss.accept();
+				String log;
+				Amethyst::printer out;
+				out.stream = &log;
+				out.text((LPCSTR) Amethyst::time().string);
+				out.text(" Connection ");
+				out.text((LPCSTR) Amethyst::address(sock.address).string);
+				out.text("\n");
+				stdout.write(log.string, log.length);
+
+				while (connection[k].connection != sock.connection)
 				{
-					if (!connection[(k + i) % length].opening)
+					for (DWORD i = 0; i < length; i++)
 					{
-						k = (k + i) % length;
-						connection[k] = sock;
-						goto REQU;
+						if (!connection[(k + i) % length].opening)
+						{
+							k = (k + i) % length;
+							connection[k] = sock;
+							goto REQU;
+						}
 					}
+					WSA::Socket *newConn = (WSA::Socket *) Memory::allocate(sizeof(WSA::Socket) * length * 2);
+					for (DWORD i = 0; i < length * 2; new(newConn + i++) WSA::Socket());
+					Memory::copy(connection, newConn, length);
+					Memory::free(connection);
+					connection = newConn;
+					length *= 2;
 				}
-				WSA::Socket *newConn = (WSA::Socket *) Memory::allocate(sizeof(WSA::Socket) * length * 2);
-				for (DWORD i = 0; i < length * 2; new(newConn + i++) WSA::Socket());
-				Memory::copy(connection, newConn, length);
-				Memory::free(connection);
-				connection = newConn;
-				length *= 2;
+				REQU:;
+				MT::thread *conn = (MT::thread *) Memory::allocate(sizeof(MT::thread));
+				new(conn) MT::thread(Amethyst::connection, connection + k);
 			}
-			REQU:;
-			MT::thread *conn = (MT::thread *)Memory::allocate(sizeof(MT::thread));
-			new(conn) MT::thread(Amethyst::connection, connection + k);
-		}
-		catch (const EA::exception &e)
-		{
-			if (e.type == EA::exception::EXTERNAL && e.value == WSA::SOCKET_CLOSED)
+			catch (const EA::exception &e)
 			{
-				running = 0;
+				if (e.type == EA::exception::EXTERNAL && e.value == WSA::SOCKET_CLOSED)
+				{
+					running = 0;
+				}
 			}
 		}
+
+		for (DWORD i = 0; i < length; connection[i++].close());
+
+		ss.close();
+
+		while (Amethyst::thread)
+		{
+			Sleep(1);
+		}
+
+		Amethyst::resource->Amethyst::property::~property();
+		Amethyst::app->Amethyst::application::~application();
+		Memory::free(Amethyst::resource);
+		Memory::free(Amethyst::app);
+		Memory::free(Amethyst::root);
+
+		WSA::cleanup();
 	}
-
-	for (DWORD i = 0; i < length; connection[i++].close());
-
-	ss.close();
-
-	while (Amethyst::thread)
+	catch (const EA::exception &e)
 	{
-		Sleep(1);
+		if (e.type == EA::exception::INTERNAL)
+		{
+			if (e.value == WSAEADDRINUSE)
+			{
+				stdout.write((BYTE *)"Address already in use.\n", 24);
+			}
+		}
+		exit((e.value << 1) | e.type);
 	}
-
-	Amethyst::resource->Amethyst::property::~property();
-	Amethyst::app->Amethyst::application::~application();
-	Memory::free(Amethyst::resource);
-	Memory::free(Amethyst::app);
-	Memory::free(Amethyst::root);
-
-	WSA::cleanup();
 }
 
 
