@@ -141,7 +141,7 @@ namespace WSA
 	const static WORD SOCKET_CLOSED = 1;
 	const static WORD SOCKET_BOUND  = 2;
 
-	// IP and PORT
+	// IPv4 IP and PORT
 	class SocketAddress;
 	// Base ServerSocket operation
 	class ServerSocket;
@@ -206,7 +206,7 @@ namespace Hexadecimal
 	{
 		for (int i = 0; i < 16; i++)
 		{
-			data[15 - i] = H[num & 0xFF];
+			data[15 - i] = H[num & 0xF];
 			num >>= 4;
 		}
 	}
@@ -271,7 +271,7 @@ class String: public FS::BIO
 			QWORD newLen = this->memory;
 			while (newLen < this->length + len)
 			{
-				newLen >>= 1;
+				newLen <<= 1;
 			}
 			BYTE *newArr = (BYTE *) Memory::allocate(newLen);
 			Memory::copy(this->string, newArr, this->length);
@@ -293,6 +293,13 @@ class String: public FS::BIO
 		}
 		return false;
 	}
+	void rewind(QWORD len)
+	{
+		QWORD available = this->length - this->position;
+		len = len < available ? len : available;
+		this->length -= len;
+		this->string[this->length] = 0;
+	}
 	static BYTE equals(LPCSTR s1, LPCSTR s2, QWORD length)
 	{
 		while (length--)
@@ -310,6 +317,8 @@ namespace Amethyst
 	BYTE space(BYTE c);
 	DWORD console(LPVOID param);
 	DWORD connection(LPVOID);
+	String address(WSA::SocketAddress &);
+	String time();
 
 	class scanner
 	{
@@ -320,6 +329,15 @@ namespace Amethyst
 		String string() const;
 		QWORD number() const;
 	};
+	class printer
+	{
+		public:
+		FS::BIO *stream = NULL;
+		DWORD wide = 0;
+		BYTE fill = ' ';
+		void text(LPCSTR) const;
+		void number(QWORD) const;
+	};
 
 	BYTE space(BYTE c)
 	{
@@ -327,8 +345,9 @@ namespace Amethyst
 	}
 	DWORD console(LPVOID param)
 	{
-		LPVOID *ps = (LPVOID *)param;
-		BYTE &running = *((BYTE*)ps[1]);
+		LPVOID *ps = ((LPVOID **)param)[1];
+		BYTE &running = *((BYTE*)ps[0]);
+		WSA::ServerSocket *server = (WSA::ServerSocket *)ps[1];
 
 		FS::FD fdVal = GetStdHandle(STD_INPUT_HANDLE);
 		FS::FIO file(fdVal);
@@ -340,16 +359,23 @@ namespace Amethyst
 			if (String::equals((LPCSTR)str.string, "stop", 4))
 			{
 				running = 0;
+				server->close();
 			}
 		}
 		return 0;
 	}
 	DWORD connection(LPVOID param)
 	{
+		/**
+		 * @TODO free memory of thread
+		 */
 		MT::thread *t = (MT::thread *)((LPVOID *)param)[0];
 		WSA::Socket *sock = (WSA::Socket *)((LPVOID *)param)[1];
+		FS::FIO stdout = FS::FIO(GetStdHandle(STD_OUTPUT_HANDLE));
 
-		while (sock->opening)
+		BYTE keep = 1;
+
+		while (keep && sock->opening)
 		{
 			Amethyst::scanner scn;
 			Amethyst::scanner strScn;
@@ -358,41 +384,160 @@ namespace Amethyst
 			QWORD length = 0;
 
 			String str = (String &&)scn.text();
-			strScn.stream = &str;
-			String method = (String &&)strScn.string();
-			String url = (String &&)strScn.string();
-
-			// read request header
-			str = (String &&)scn.text();
-			str.length--;
-			while (str.length)
+			if (str.length)
 			{
+				String log;
+				Amethyst::printer stdoutprt;
+				stdoutprt.stream = &log;
+				stdoutprt.text((LPCSTR)Amethyst::time().string);
+				stdoutprt.text(" ");
+				stdoutprt.text((LPCSTR)Amethyst::address(sock->address).string);
+				stdoutprt.text(" -> ");
+
+
+				str.rewind(1);
 				strScn.stream = &str;
-				String field = (String &&)strScn.string();
-				field.length--;
-				if (field.equals("Content-Length"))
+				String method = (String &&) strScn.string();
+				String url = (String &&) strScn.string();
+				String ver = (String &&) strScn.string();
+
+				log.write(method.string, method.length);
+				stdoutprt.text(" ");
+				log.write(url.string, url.length);
+				stdoutprt.text("\n");
+
+				stdout.write(log.string, log.length);
+
+				// read request header
+				str = (String &&) scn.text();
+				str.rewind(1);
+				while (str.length)
 				{
-					length = strScn.number();
+					strScn.stream = &str;
+					String field = (String &&) strScn.string();
+					field.rewind(1);
+					if (field.equals("Content-Length"))
+					{
+						length = strScn.number();
+					}
+					else if (field.equals("Connection"))
+					{
+						keep = strScn.string().equals("keep-alive");
+					}
+					str = scn.text();
+					str.rewind(1);
 				}
-			}
 
-			BYTE *buf = (BYTE *)Memory::allocate(length);
-			for (QWORD readed = 0; readed < length; readed += sock->read(buf, length - readed));
-			Memory::free(buf);
+				BYTE *buf = (BYTE *) Memory::allocate(length);
+				for (QWORD readed = 0; readed < length; readed += sock->read(buf, length - readed));
+				Memory::free(buf);
 
-			if (method.equals("GET"))
-			{
-				if (FS::exist((LPCSTR)(url.string + 1)))
+				if (method.equals("GET"))
 				{
+					if (FS::exist((LPCSTR) (url.string + 1)))
+					{
+						FS::FIO file = FS::FIO((LPCSTR) (url.string + 1));
+						String header;
+						String content;
+						Amethyst::printer out;
+
+						BYTE b[1024];
+						DWORD len;
+						while ((len = file.read(b, 1024)))
+						{
+							content.write(b, len);
+						}
+
+						out.stream = &header;
+						header.write(ver.string, ver.length);
+						out.text(" 200 OK\r\n");
+						out.text("Content-Length: ");
+						out.number(content.length);
+						out.text("\r\n\r\n");
+
+						sock->write(header.string, header.length);
+						sock->write(content.string, content.length);
+					}
+					else
+					{
+						Amethyst::printer out;
+						out.stream = sock;
+						sock->write(ver.string, ver.length);
+						out.text(" 404 Not Found\r\n");
+						out.text("Content-Length: 0\r\n\r\n");
+					}
 				}
 			}
 		}
+
+
+		String log;
+		Amethyst::printer stdoutprt;
+		stdoutprt.stream = &log;
+		stdoutprt.text((LPCSTR)Amethyst::time().string);
+		stdoutprt.text(" Disconnect ");
+		stdoutprt.text((LPCSTR)Amethyst::address(sock->address).string);
+		stdoutprt.text("\n");
+		stdout.write(log.string, log.length);
+		sock->close();
 
 		/*
 		 * @TODO free not here but out of thread
 		 */
 		Memory::free(sock);
 		return 0;
+	}
+	String address(WSA::SocketAddress &addr)
+	{
+		BYTE b[16];
+		BYTE dot = '.';
+		Hexadecimal::transform(addr.make(), b);
+		String str;
+		str.write(b + 14, 2);
+		str.write(&dot, 1);
+		str.write(b + 12, 2);
+		str.write(&dot, 1);
+		str.write(b + 10, 2);
+		str.write(&dot, 1);
+		str.write(b + 8, 2);
+		dot = ':';
+		str.write(&dot, 1);
+		Hexadecimal::transform(addr.ID, b);
+		str.write(b + 12, 4);
+		dot = 0;
+		str.write(&dot, 1);
+		str.length--;
+		return str;
+	}
+	String time()
+	{
+		String str;
+		Amethyst::printer out;
+		out.stream = &str;
+		out.wide = 2;
+		out.fill = '0';
+		BYTE b[16];
+		Hexadecimal::transform(GetCurrentThreadId(), b);
+		BYTE dot = '[';
+		SYSTEMTIME t;
+		GetSystemTime(&t);
+
+		str.write(&dot, 1);
+		dot = ':';
+		out.number(t.wHour);
+		str.write(&dot, 1);
+		out.number(t.wMinute);
+		str.write(&dot, 1);
+		out.number(t.wSecond);
+		dot = ' ';
+		str.write(&dot, 1);
+		str.write(b + 8, 8);
+		dot = ']';
+		str.write(&dot, 1);
+		dot = 0;
+		str.write(&dot, 1);
+		str.length--;
+		return str;
 	}
 	Amethyst::scanner::scanner() = default;
 	String Amethyst::scanner::text() const
@@ -403,21 +548,25 @@ namespace Amethyst
 		{
 			str.write(&c, 1);
 		}
+		c = '\0';
+		str.write(&c, 1);
+		str.length--;
 		return str;
 	}
 	String Amethyst::scanner::string() const
 	{
 		String str;
 		BYTE c;
-		while (this->stream->read(&c, 1) && Amethyst::space(c));
-		while (!Amethyst::space(c))
+		DWORD len;
+		while ((len = this->stream->read(&c, 1)) && Amethyst::space(c));
+		while (len && !Amethyst::space(c))
 		{
 			str.write(&c, 1);
-			if (!this->stream->read(&c, 1))
-			{
-				break;
-			}
+			len = this->stream->read(&c, 1);
 		}
+		c = '\0';
+		str.write(&c, 1);
+		str.length--;
 		return str;
 	}
 	QWORD Amethyst::scanner::number() const
@@ -436,28 +585,84 @@ namespace Amethyst
 		}
 		return num;
 	}
+	void Amethyst::printer::text(LPCSTR str) const
+	{
+		LPCSTR p = str;
+		while (*p++);
+		QWORD len = p - str - 1;
+		this->stream->write((BYTE *)str, len);
+	}
+	void Amethyst::printer::number(QWORD num) const
+	{
+		QWORD x = 0;
+		QWORD w = 0;
+		while (num)
+		{
+			w++;
+			x *= 10;
+			x += num % 10;
+			num /= 10;
+		}
+		if (w < this->wide)
+		{
+			for (DWORD dif = this->wide - w; dif--;)
+			{
+				this->stream->write((BYTE *)(&(this->fill)), 1);
+			}
+		}
+		while (w--)
+		{
+			BYTE c = (x % 10) + '0';
+			x /= 10;
+			this->stream->write(&c, 1);
+		}
+	}
 }
 
 int main()
 {
+	FS::FIO stdout = FS::FIO(GetStdHandle(STD_OUTPUT_HANDLE));
+	stdout.write((BYTE *)"A simple HTTP server - IPv4\n", 28);
+
 	WSA::startup();
 
 	WSA::ServerSocket ss = WSA::ServerSocket(80);
 
 
 	BYTE running = 1;
-	MT::thread consoleListener = MT::thread(&Amethyst::console, &running);
+	LPVOID *ps = (LPVOID *)Memory::allocate(sizeof(LPVOID) * 2);
+	ps[0] = &running;
+	ps[1] = &ss;
+	MT::thread(&Amethyst::console, ps);
 
 	while (running)
 	{
 		WSA::Socket *sock = (WSA::Socket *)Memory::allocate(sizeof(WSA::Socket));
 		new(sock) WSA::Socket();
-		*sock = ss.accept();
-		MT::thread *conn = (MT::thread *)Memory::allocate(sizeof(MT::thread));
-		new(conn) MT::thread(Amethyst::connection, sock);
+		try
+		{
+			*sock = ss.accept();
+			String log;
+			Amethyst::printer out;
+			out.stream = &log;
+			out.text((LPCSTR)Amethyst::time().string);
+			out.text(" Connection ");
+			out.text((LPCSTR)Amethyst::address(sock->address).string);
+			out.text("\n");
+			stdout.write(log.string, log.length);
+			MT::thread *conn = (MT::thread *)Memory::allocate(sizeof(MT::thread));
+			new(conn) MT::thread(Amethyst::connection, sock);
+		}
+		catch (const EA::exception &e)
+		{
+			if (e.type == EA::exception::EXTERNAL && e.value == WSA::SOCKET_CLOSED)
+			{
+				running = 0;
+			}
+		}
 	}
 
-	consoleListener.close();
+	ss.close();
 
 	WSA::cleanup();
 }
@@ -651,6 +856,7 @@ void FS::FIO::write(BYTE *b, DWORD len)
 	if (this->opening)
 	{
 		FS::write(this->file, b, len);
+		return;
 	}
 	throw EA::exception(EA::exception::EXTERNAL, FS::FILE_CLOSED);
 }
@@ -754,6 +960,10 @@ WSA::Socket WSA::ServerSocket::accept() const
 	int len = sizeof(SOCKADDR_IN);
 
 	SOCKET conn = ::accept(this->connection, (SOCKADDR *)&addr, &len);
+	if (conn == INVALID_SOCKET)
+	{
+		throw EA::exception(EA::exception::EXTERNAL, WSA::SOCKET_CLOSED);
+	}
 	WSA::Socket sock;
 	sock.connection = conn;
 	sock.address.take(addr.sin_addr.S_un.S_addr);
@@ -763,12 +973,15 @@ WSA::Socket WSA::ServerSocket::accept() const
 }
 void WSA::ServerSocket::close()
 {
-	int err = closesocket(this->connection);
-	if (err)
+	if (this->opening)
 	{
-		throw EA::exception(EA::exception::INTERNAL, WSAGetLastError());
+		int err = closesocket(this->connection);
+		if (err)
+		{
+			throw EA::exception(EA::exception::INTERNAL, WSAGetLastError());
+		}
+		this->opening = 0;
 	}
-	this->opening = 0;
 }
 DWORD WSA::Socket::read(BYTE *b, DWORD len)
 {
