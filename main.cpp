@@ -42,10 +42,10 @@ namespace MT
 		HANDLE object = 0;
 
 		thread(DWORD (*)(LPVOID), LPVOID);
+		~thread();
 		explicit thread(HANDLE);
 		static MT::thread current();
 		BYTE alive() const;
-		void close() const;
 	};
 }
 
@@ -112,10 +112,14 @@ namespace FS
 		static const BYTE RD = OF_READ;
 		static const BYTE WT = OF_WRITE;
 		static const BYTE RW = OF_READWRITE;
+		BYTE closing = 1;
 
 		explicit FIO(LPCSTR);
 		explicit FIO(FS::FD);
 		FIO(LPCSTR, BYTE);
+		FIO(FIO &&file);
+		~FIO();
+		FS::FIO &operator=(FS::FIO &&file);
 		DWORD read(BYTE *, DWORD) override;
 		void write(BYTE *, DWORD) override;
 		void seek(QWORD) const;
@@ -434,12 +438,13 @@ namespace Amethyst
 	DWORD console(LPVOID param)
 	{
 		Amethyst::thread++;
-		LPVOID *ps = ((LPVOID **)param)[1];
+		LPVOID *ps = (LPVOID *)param;
 		BYTE &running = *((BYTE*)ps[0]);
 		WSA::ServerSocket *server = (WSA::ServerSocket *)ps[1];
 
 		FS::FD fdVal = GetStdHandle(STD_INPUT_HANDLE);
 		FS::FIO file(fdVal);
+		file.closing = 0;
 		Amethyst::scanner scn;
 		scn.stream = &file;
 		while (running)
@@ -457,12 +462,9 @@ namespace Amethyst
 	DWORD connection(LPVOID param)
 	{
 		Amethyst::thread++;
-		/**
-		 * @TODO free memory of thread
-		 */
-		MT::thread *t = (MT::thread *)((LPVOID *)param)[0];
-		WSA::Socket *sock = (WSA::Socket *)((LPVOID *)param)[1];
+		WSA::Socket *sock = (WSA::Socket *)param;
 		FS::FIO stdout = FS::FIO(GetStdHandle(STD_OUTPUT_HANDLE));
+		stdout.closing = 0;
 
 		BYTE keep = 1;
 
@@ -579,7 +581,6 @@ namespace Amethyst
 			{
 				content.write(b, len);
 			}
-			file.close();
 
 			out.stream = &header;
 			header.write(obj.version.string, obj.version.length);
@@ -823,6 +824,10 @@ namespace Amethyst
 		{
 			this->key[this->count].~String();
 		}
+		Memory::free(this->key);
+		Memory::free(this->value);
+		this->key = NULL;
+		this->value = NULL;
 	}
 	void Amethyst::application::set(const String &k, void (*v)(const HTTP &))
 	{
@@ -873,7 +878,6 @@ int main()
 	Amethyst::property properties;
 	FS::FIO prop = FS::FIO("server.properties");
 	properties.load(prop);
-	prop.close();
 
 	// console output
 	FS::FIO stdout = FS::FIO(GetStdHandle(STD_OUTPUT_HANDLE));
@@ -890,7 +894,6 @@ int main()
 	*Amethyst::root = properties["root"];
 	prop = FS::FIO("resources.properties");
 	Amethyst::resource->load(prop);
-	prop.close();
 
 	WSA::startup();
 
@@ -1025,19 +1028,16 @@ DWORD MT::start(LPVOID param)
 {
 	LPVOID *ps = (LPVOID *)param;
 	DWORD (*entry)(LPVOID) = (DWORD (*)(LPVOID))ps[0];
-	MT::thread *t = (MT::thread *)ps[1];
-
-	DWORD ret = entry(ps + 1);
+	LPVOID entryParam = ps[1];
 	Memory::free(param);
-	t->close();
+	DWORD ret = entry(entryParam);
 	return ret;
 }
 MT::thread::thread(DWORD (*proc)(LPVOID), LPVOID param)
 {
-	LPVOID *ps = (LPVOID *)Memory::allocate(3 * sizeof(LPVOID));
+	LPVOID *ps = (LPVOID *)Memory::allocate(2 * sizeof(LPVOID));
 	ps[0] = (LPVOID)proc;
-	ps[1] = this;
-	ps[2] =param;
+	ps[1] = param;
 	this->object = CreateThread(NULL, 0, &start, ps, 0, &this->ID);
 	if (!this->object)
 	{
@@ -1051,6 +1051,10 @@ MT::thread::thread(HANDLE obj): object(obj), ID(GetThreadId(obj))
 	{
 		throw EA::exception(EA::exception::INTERNAL, GetLastError());
 	}
+}
+MT::thread::~thread()
+{
+	CloseHandle(this->object);
 }
 MT::thread MT::thread::current()
 {
@@ -1068,14 +1072,6 @@ BYTE MT::thread::alive() const
 		throw EA::exception(EA::exception::INTERNAL, GetLastError());
 	}
 	return code != STILL_ACTIVE;
-}
-void MT::thread::close() const
-{
-	if (!CloseHandle(this->object))
-	{
-		int err = GetLastError();
-		throw EA::exception(EA::exception::INTERNAL, err);
-	}
 }
 
 
@@ -1162,6 +1158,32 @@ FS::FIO::FIO(FS::FD fdVal): file(fdVal)
 FS::FIO::FIO(LPCSTR path, BYTE mode): file(FS::open(path, mode))
 {
 }
+FS::FIO::FIO(FIO &&file): file(file.file)
+{
+	file.file = NULL;
+	file.closing = 0;
+	file.opening = 0;
+}
+FS::FIO::~FIO()
+{
+	if (this->closing)
+	{
+		this->close();
+	}
+}
+FS::FIO &FS::FIO::operator=(FS::FIO &&fVal)
+{
+	if (this->file)
+	{
+		CloseHandle(this->file);
+	}
+	this->opening = 1;
+	this->file = fVal.file;
+	fVal.file = NULL;
+	fVal.closing = 0;
+	fVal.opening = 0;
+	return *this;
+}
 DWORD FS::FIO::read(BYTE *b, DWORD len)
 {
 	if (this->opening)
@@ -1185,6 +1207,7 @@ void FS::FIO::seek(QWORD offset) const
 }
 void FS::FIO::close()
 {
+	this->opening &= this->file != NULL;
 	if (this->opening)
 	{
 		FS::close(this->file);
