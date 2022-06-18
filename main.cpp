@@ -86,7 +86,6 @@ namespace FS
 
 	BYTE create(LPCSTR);
 	FS::FD open(LPCSTR, DWORD);
-	FS::FD open(LPCSTR);
 	void close(FS::FD);
 	BYTE exist(LPCSTR);
 	DWORD read(FD, BYTE *, DWORD);
@@ -109,17 +108,13 @@ namespace FS
 		BYTE opening = 1;
 
 		public:
-		static const BYTE RD = OF_READ;
-		static const BYTE WT = OF_WRITE;
-		static const BYTE RW = OF_READWRITE;
 		BYTE closing = 1;
 
 		explicit FIO(LPCSTR);
 		explicit FIO(FS::FD);
-		FIO(LPCSTR, BYTE);
 		FIO(FIO &&file);
 		~FIO();
-		FS::FIO &operator=(FS::FIO &&file);
+		FS::FIO &operator=(FS::FIO &&);
 		DWORD read(BYTE *, DWORD) override;
 		void write(BYTE *, DWORD) override;
 		void seek(QWORD) const;
@@ -182,7 +177,6 @@ namespace WSA
 		public:
 		ServerSocket() = default;
 		explicit ServerSocket(DWORD);
-		explicit ServerSocket(const WSA::SocketAddress &);
 		void bind(const SocketAddress &);
 		WSA::Socket accept() const;
 		void close();
@@ -1054,7 +1048,11 @@ MT::thread::thread(HANDLE obj): object(obj), ID(GetThreadId(obj))
 }
 MT::thread::~thread()
 {
-	CloseHandle(this->object);
+	if (this->object)
+	{
+		CloseHandle(this->object);
+		this->object = NULL;
+	}
 }
 MT::thread MT::thread::current()
 {
@@ -1097,10 +1095,6 @@ FS::FD FS::open(LPCSTR path, DWORD mode)
 		throw EA::exception(EA::exception::INTERNAL, GetLastError());
 	}
 	return (FS::FD)(QWORD)(DWORD)hfVal;
-}
-FS::FD FS::open(LPCSTR path)
-{
-	return FS::open(path, OF_READWRITE);
 }
 void FS::close(FS::FD fdVal)
 {
@@ -1149,13 +1143,10 @@ void FS::seek(FD fdVal, QWORD offset, DWORD mode)
 		throw EA::exception(EA::exception::EXTERNAL, GetLastError());
 	}
 }
-FS::FIO::FIO(LPCSTR path): FIO(path, FS::FIO::RW)
+FS::FIO::FIO(LPCSTR path): file(FS::open(path, OF_READWRITE))
 {
 }
 FS::FIO::FIO(FS::FD fdVal): file(fdVal)
-{
-}
-FS::FIO::FIO(LPCSTR path, BYTE mode): file(FS::open(path, mode))
 {
 }
 FS::FIO::FIO(FIO &&file): file(file.file)
@@ -1261,10 +1252,6 @@ void WSA::SocketAddress::take(DWORD addr)
 	this->address[1] = (addr >> 16) & 0xFF;
 	this->address[2] = (addr >> 8) & 0xFF;
 	this->address[3] = addr & 0xFF;
-}
-WSA::ServerSocket::ServerSocket(const WSA::SocketAddress &address)
-{
-	this->bind(address);
 }
 WSA::ServerSocket::ServerSocket(DWORD port)
 {
